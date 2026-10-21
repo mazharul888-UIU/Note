@@ -17,7 +17,7 @@ npm run dev
 
 Set `OWNER_CODE_HASH` to the lowercase SHA-256 hex digest of the owner code, `SESSION_SECRET` to a long random value, and `BLOB_READ_WRITE_TOKEN` to a private Vercel Blob store token. To use Postgres, connect the Neon resource to the project so Vercel injects `DATABASE_URL`. Keep the Blob token configured for attachments and the one-time import.
 
-For a planned production cutover, pull the production environment into an ignored local file and run `node --experimental-strip-types --env-file=.env.production.local scripts/migrate-to-neon.mjs` before deploying. The script verifies that the copied workspace matches the Blob snapshot. The old Blob snapshot stays available as a fallback copy.
+For a planned production cutover, pull the production environment into an ignored local file and run `node --experimental-strip-types --env-file=.env.production.local scripts/migrate-to-neon.mjs` before deploying. The script verifies that the copied workspace matches the Blob snapshot. The old Blob snapshot remains as a historical copy and is not updated after the database cutover.
 
 ## Verify
 
