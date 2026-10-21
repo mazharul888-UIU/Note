@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { ArrowLeft, BookOpen, ExternalLink, FileText, Layers3, Search } from "lucide-react";
 import type { NotesData } from "@/lib/notes";
@@ -8,6 +8,7 @@ import type { NotesData } from "@/lib/notes";
 export default function Viewer({ data }: { data: NotesData }) {
   const [query, setQuery] = useState("");
   const [selected, setSelected] = useState<string | null>(null);
+  useEffect(() => { const id = new URLSearchParams(window.location.search).get("note"); if (id && data.notes.some(note => note.id === id)) setSelected(id); }, [data]);
   const notes = useMemo(() => {
     const value = query.trim().toLowerCase();
     return data.notes.filter(note => !value || [note.title, note.content, note.tags, data.courses.find(course => course.id === note.courseId)?.title || ""].some(text => text.toLowerCase().includes(value)));
