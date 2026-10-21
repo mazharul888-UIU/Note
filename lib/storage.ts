@@ -14,14 +14,16 @@ export async function loadNotes(): Promise<{ data: NotesData; revision: string |
 
 export async function saveNotes(data: NotesData, revision: string | null): Promise<"saved" | "conflict"> {
   const current = await loadNotes();
-  if (current.revision !== revision) return "conflict";
+  // Tabs opened before the strong ETag fix may still submit a weak revision.
+  const strongRevision = revision?.replace(/^W\//, "") ?? null;
+  if (current.revision !== strongRevision) return "conflict";
   try {
     await put(PATH, JSON.stringify(data), {
       access: "private",
       contentType: "application/json",
       addRandomSuffix: false,
-      allowOverwrite: revision !== null,
-      ...(revision ? { ifMatch: revision } : {}),
+      allowOverwrite: strongRevision !== null,
+      ...(strongRevision ? { ifMatch: strongRevision } : {}),
     });
     const retained = new Set(data.notes.flatMap(note => note.attachments.map(file => file.pathname)));
     const removed = current.data.notes.flatMap(note => note.attachments.map(file => file.pathname)).filter(pathname => !retained.has(pathname));

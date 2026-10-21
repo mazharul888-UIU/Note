@@ -5,6 +5,7 @@ import Link from "next/link";
 import { upload } from "@vercel/blob/client";
 import { ArrowRight, BookOpen, Bookmark, Check, ChevronDown, ChevronRight, Download, Eye, EyeOff, FileText, FolderOpen, Home, Layers3, LogOut, Menu, Paperclip, Pencil, Pin, Plus, Search, Trash2, Upload, X } from "lucide-react";
 import type { Attachment, Course, Note, NotesData, Trimester } from "@/lib/notes";
+import { rebaseCreated, type CreatedItem } from "@/lib/rebase-created";
 
 type Data = NotesData;
 type Kind = "trimester" | "course" | "note";
@@ -114,9 +115,20 @@ export default function Workspace({ displayName }: { displayName: string }) {
     setPendingFiles(current => [...current, ...files]);
     setFormError("");
   }
-  async function persist(next: Data) {
-    const response = await fetch("/api/workspace", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ data: next, revision }) });
+  async function persist(next: Data, created?: CreatedItem) {
+    const write = (value: Data, version: string | null) => fetch("/api/workspace", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ data: value, revision: version }) });
+    let response = await write(next, revision);
     if (response.status === 401) { window.location.assign("/owner/login"); throw new Error("Your owner session has expired."); }
+    if (response.status === 409) {
+      const latestResponse = await fetch("/api/workspace", { cache: "no-store" });
+      if (!latestResponse.ok) throw new Error("Could not refresh your workspace. Please try again.");
+      const latest = await latestResponse.json();
+      setData(latest.data);
+      setRevision(latest.revision);
+      const rebased = created && rebaseCreated(latest.data, next, created);
+      if (rebased) response = await write(rebased, latest.revision);
+    }
+    if (response.status === 409) throw new Error("Your workspace changed. Your draft is still open; review it and save again.");
     const state = await response.json();
     if (!response.ok) throw new Error(state.error || "Could not save notes.");
     setData(state.data);
@@ -173,7 +185,7 @@ export default function Workspace({ displayName }: { displayName: string }) {
         const item: Note = { id, title, courseId: form.courseId, content: form.content, tags: form.tags.trim(), sourceUrl, pinned: form.pinned, published: form.published, attachments, createdAt: data.notes.find(x => x.id === id)?.createdAt || now, updatedAt: now };
         next = { ...data, notes: [item, ...data.notes.filter(x => x.id !== id)] };
       }
-      await persist(next);
+      await persist(next, form.id ? undefined : { kind: form.kind, id });
       setForm(null);
       setPendingFiles([]);
       if (!form.id && form.kind === "trimester") navigate(`trim:${id}`);
