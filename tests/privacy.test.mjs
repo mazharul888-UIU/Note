@@ -41,3 +41,15 @@ test("invalid hierarchy and visibility values are rejected", () => {
   delete invalid.notes[0].published;
   assert.throws(() => parseNotesData(invalid));
 });
+
+test("attachments follow note visibility and invalid paths are rejected", () => {
+  const withFiles = structuredClone(sample);
+  const file = { id: "a1", pathname: "note-files/123e4567-e89b-42d3-a456-426614174000", name: "lecture.pdf", size: 1234, contentType: "application/pdf", createdAt: 1 };
+  withFiles.notes[0].attachments = [file];
+  withFiles.notes[1].attachments = [{ ...file, id: "a2", pathname: "note-files/123e4567-e89b-42d3-a456-426614174001", name: "secret.pdf" }];
+  const publicData = publicNotes(parseNotesData(withFiles));
+  assert.equal(publicData.notes[0].attachments[0].name, "lecture.pdf");
+  assert.doesNotMatch(JSON.stringify(publicData), /secret.pdf/);
+  withFiles.notes[0].attachments[0].pathname = "sami-notes/data.json";
+  assert.throws(() => parseNotesData(withFiles));
+});

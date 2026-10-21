@@ -2,18 +2,20 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
-import { ArrowRight, BookOpen, Bookmark, Check, ChevronDown, ChevronRight, Download, Eye, EyeOff, FileText, FolderOpen, Home, Layers3, LogOut, Menu, Pencil, Pin, Plus, Search, Trash2, Upload, X } from "lucide-react";
+import { upload } from "@vercel/blob/client";
+import { ArrowRight, BookOpen, Bookmark, Check, ChevronDown, ChevronRight, Download, Eye, EyeOff, FileText, FolderOpen, Home, Layers3, LogOut, Menu, Paperclip, Pencil, Pin, Plus, Search, Trash2, Upload, X } from "lucide-react";
+import type { Attachment, Course, Note, NotesData, Trimester } from "@/lib/notes";
 
-type Trimester = { id: string; title: string; description: string; createdAt: number };
-type Course = { id: string; trimesterId: string; title: string; code: string; color: string; createdAt: number };
-type Note = { id: string; courseId: string; title: string; content: string; tags: string; sourceUrl: string; pinned: boolean; published: boolean; createdAt: number; updatedAt: number };
-type Data = { trimesters: Trimester[]; courses: Course[]; notes: Note[] };
+type Data = NotesData;
 type Kind = "trimester" | "course" | "note";
-type Form = { kind: Kind; id?: string; title: string; description: string; trimesterId: string; code: string; color: string; courseId: string; content: string; tags: string; sourceUrl: string; pinned: boolean; published: boolean };
+type Form = { kind: Kind; id?: string; title: string; description: string; trimesterId: string; code: string; color: string; courseId: string; content: string; tags: string; sourceUrl: string; pinned: boolean; published: boolean; attachments: Attachment[] };
 const EMPTY: Data = { trimesters: [], courses: [], notes: [] };
 const COLORS = ["sage", "peach", "lavender", "blue"];
 const STORAGE_KEY = "sami-notes-v1";
 const MIGRATED_KEY = "sami-notes-browser-imported-v1";
+const MAX_FILE_SIZE = 50_000_000;
+
+function fileSize(bytes: number): string { return bytes >= 1_000_000 ? `${(bytes / 1_000_000).toFixed(1)} MB` : `${Math.max(1, Math.round(bytes / 1000))} KB`; }
 
 function readBackup(value: unknown): Data {
   if (!value || typeof value !== "object") throw new Error("This is not a Sami Notes backup.");
@@ -32,17 +34,22 @@ function readBackup(value: unknown): Data {
   const notes = backup.notes.map((item: unknown) => {
     const row = item as Record<string, unknown>;
     if (typeof row?.id !== "string" || typeof row?.courseId !== "string" || typeof row?.title !== "string") throw new Error("The backup has an invalid note.");
-    return { id: row.id, courseId: row.courseId, title: row.title, content: typeof row.content === "string" ? row.content : "", tags: typeof row.tags === "string" ? row.tags : "", sourceUrl: typeof row.sourceUrl === "string" ? row.sourceUrl : "", pinned: row.pinned === true, published: row.published === true, createdAt: Number(row.createdAt) || Date.now(), updatedAt: Number(row.updatedAt) || Date.now() };
+    const attachments = Array.isArray(row.attachments) ? row.attachments.map((value: unknown) => {
+      const file = value as Record<string, unknown>;
+      if (typeof file?.id !== "string" || typeof file?.pathname !== "string" || typeof file?.name !== "string" || typeof file?.size !== "number" || typeof file?.contentType !== "string") throw new Error("The backup has an invalid attachment.");
+      return { id: file.id, pathname: file.pathname, name: file.name, size: file.size, contentType: file.contentType, createdAt: Number(file.createdAt) || Date.now() };
+    }) : [];
+    return { id: row.id, courseId: row.courseId, title: row.title, content: typeof row.content === "string" ? row.content : "", tags: typeof row.tags === "string" ? row.tags : "", sourceUrl: typeof row.sourceUrl === "string" ? row.sourceUrl : "", pinned: row.pinned === true, published: row.published === true, attachments, createdAt: Number(row.createdAt) || Date.now(), updatedAt: Number(row.updatedAt) || Date.now() };
   });
   if (courses.some(course => !trimesters.some(trimester => trimester.id === course.trimesterId)) || notes.some(note => !courses.some(course => course.id === note.courseId))) throw new Error("The backup has notes or courses without a parent.");
   return { trimesters, courses, notes };
 }
 
 function formFor(kind: Kind, item?: Trimester | Course | Note, parentId = ""): Form {
-  const base: Form = { kind, id: item?.id, title: item?.title || "", description: "", trimesterId: "", code: "", color: "sage", courseId: "", content: "", tags: "", sourceUrl: "", pinned: false, published: false };
+  const base: Form = { kind, id: item?.id, title: item?.title || "", description: "", trimesterId: "", code: "", color: "sage", courseId: "", content: "", tags: "", sourceUrl: "", pinned: false, published: false, attachments: [] };
   if (kind === "trimester") return { ...base, description: (item as Trimester | undefined)?.description || "" };
   if (kind === "course") return { ...base, trimesterId: (item as Course | undefined)?.trimesterId || parentId, code: (item as Course | undefined)?.code || "", color: (item as Course | undefined)?.color || "sage" };
-  return { ...base, courseId: (item as Note | undefined)?.courseId || parentId, content: (item as Note | undefined)?.content || "", tags: (item as Note | undefined)?.tags || "", sourceUrl: (item as Note | undefined)?.sourceUrl || "", pinned: (item as Note | undefined)?.pinned || false, published: (item as Note | undefined)?.published || false };
+  return { ...base, courseId: (item as Note | undefined)?.courseId || parentId, content: (item as Note | undefined)?.content || "", tags: (item as Note | undefined)?.tags || "", sourceUrl: (item as Note | undefined)?.sourceUrl || "", pinned: (item as Note | undefined)?.pinned || false, published: (item as Note | undefined)?.published || false, attachments: (item as Note | undefined)?.attachments || [] };
 }
 
 export default function Workspace({ displayName }: { displayName: string }) {
@@ -57,6 +64,8 @@ export default function Workspace({ displayName }: { displayName: string }) {
   const [form, setForm] = useState<Form | null>(null);
   const [formError, setFormError] = useState("");
   const [saving, setSaving] = useState(false);
+  const [pendingFiles, setPendingFiles] = useState<File[]>([]);
+  const [uploadStatus, setUploadStatus] = useState("");
   const [sidebarOpen, setSidebarOpen] = useState(false);
 
   const reload = useCallback(async () => {
@@ -92,9 +101,19 @@ export default function Workspace({ displayName }: { displayName: string }) {
   }, [data, view, query, currentCourse, currentTrimester]);
 
   function navigate(next: string) { setView(next); setSidebarOpen(false); if (next !== "search") setQuery(""); }
-  function openNew(kind: Kind, parentId = "") { setFormError(""); setForm(formFor(kind, undefined, parentId)); }
-  function openEdit(kind: Kind, item: Trimester | Course | Note) { setFormError(""); setForm(formFor(kind, item)); }
+  function openNew(kind: Kind, parentId = "") { setFormError(""); setPendingFiles([]); setForm(formFor(kind, undefined, parentId)); }
+  function openEdit(kind: Kind, item: Trimester | Course | Note) { setFormError(""); setPendingFiles([]); setForm(formFor(kind, item)); }
   function patchForm<K extends keyof Form>(key: K, value: Form[K]) { setForm(current => current ? { ...current, [key]: value } : current); }
+  function selectFiles(event: React.ChangeEvent<HTMLInputElement>) {
+    const files = Array.from(event.target.files || []);
+    event.target.value = "";
+    if (!form || !files.length) return;
+    if (form.attachments.length + pendingFiles.length + files.length > 20) { setFormError("A note can have up to 20 files."); return; }
+    const tooLarge = files.find(file => file.size > MAX_FILE_SIZE);
+    if (tooLarge) { setFormError(`${tooLarge.name} is over the 50 MB limit.`); return; }
+    setPendingFiles(current => [...current, ...files]);
+    setFormError("");
+  }
   async function persist(next: Data) {
     const response = await fetch("/api/workspace", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ data: next, revision }) });
     if (response.status === 401) { window.location.assign("/owner/login"); throw new Error("Your owner session has expired."); }
@@ -117,6 +136,7 @@ export default function Workspace({ displayName }: { displayName: string }) {
     event.preventDefault();
     if (!form) return;
     setSaving(true);
+    const uploadedPaths: string[] = [];
     try {
       const title = form.title.trim();
       if (!title) throw new Error("Enter a title.");
@@ -132,21 +152,38 @@ export default function Workspace({ displayName }: { displayName: string }) {
         next = { ...data, courses: form.id ? data.courses.map(x => x.id === id ? item : x) : [...data.courses, item] };
       } else {
         if (!data.courses.some(x => x.id === form.courseId)) throw new Error("Choose a course.");
+        if (form.attachments.length + pendingFiles.length > 20) throw new Error("A note can have up to 20 files.");
         let sourceUrl = form.sourceUrl.trim();
         if (sourceUrl) {
           try { const parsed = new URL(sourceUrl); if (!["http:", "https:"].includes(parsed.protocol)) throw new Error(); sourceUrl = parsed.toString(); }
           catch { throw new Error("Use a valid http or https link."); }
         }
-        const item: Note = { id, title, courseId: form.courseId, content: form.content, tags: form.tags.trim(), sourceUrl, pinned: form.pinned, published: form.published, createdAt: data.notes.find(x => x.id === id)?.createdAt || now, updatedAt: now };
+        const attachments = [...form.attachments];
+        for (let index = 0; index < pendingFiles.length; index++) {
+          const file = pendingFiles[index];
+          if (file.size > MAX_FILE_SIZE) throw new Error(`${file.name} is over the 50 MB limit.`);
+          setUploadStatus(`Uploading ${index + 1} of ${pendingFiles.length}: ${file.name}`);
+          const blob = await upload(`note-files/${crypto.randomUUID()}`, file, {
+            access: "private", handleUploadUrl: "/api/attachments/upload", contentType: file.type || "application/octet-stream", multipart: file.size > 10_000_000,
+            onUploadProgress: ({ percentage }) => setUploadStatus(`Uploading ${index + 1} of ${pendingFiles.length}: ${Math.round(percentage)}%`),
+          });
+          uploadedPaths.push(blob.pathname);
+          attachments.push({ id: crypto.randomUUID(), pathname: blob.pathname, name: file.name, size: file.size, contentType: file.type || "application/octet-stream", createdAt: Date.now() });
+        }
+        const item: Note = { id, title, courseId: form.courseId, content: form.content, tags: form.tags.trim(), sourceUrl, pinned: form.pinned, published: form.published, attachments, createdAt: data.notes.find(x => x.id === id)?.createdAt || now, updatedAt: now };
         next = { ...data, notes: [item, ...data.notes.filter(x => x.id !== id)] };
       }
       await persist(next);
       setForm(null);
+      setPendingFiles([]);
       if (!form.id && form.kind === "trimester") navigate(`trim:${id}`);
       if (!form.id && form.kind === "course") navigate(`course:${id}`);
       setNotice(`${form.kind[0].toUpperCase()}${form.kind.slice(1)} saved.`);
-    } catch (caught) { setFormError(caught instanceof Error ? caught.message : "Could not save."); }
-    finally { setSaving(false); }
+    } catch (caught) {
+      if (uploadedPaths.length) void fetch("/api/attachments/cleanup", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ pathnames: uploadedPaths }) });
+      setFormError(caught instanceof Error ? caught.message : "Could not save.");
+    }
+    finally { setSaving(false); setUploadStatus(""); }
   }
 
   async function remove(kind: Kind, item: Trimester | Course | Note) {
@@ -168,10 +205,10 @@ export default function Workspace({ displayName }: { displayName: string }) {
   }
 
   function exportBackup() {
-    const backup = { format: "sami-notes-v1", exportedAt: new Date().toISOString(), ...data };
+    const backup = { format: "sami-notes-v2", exportedAt: new Date().toISOString(), filesIncluded: false, ...data };
     const url = URL.createObjectURL(new Blob([JSON.stringify(backup, null, 2)], { type: "application/json" }));
-    const anchor = document.createElement("a"); anchor.href = url; anchor.download = `sami-notes-backup-${new Date().toISOString().slice(0, 10)}.json`; anchor.click(); setTimeout(() => URL.revokeObjectURL(url), 1000);
-    setNotice("Backup downloaded.");
+    const anchor = document.createElement("a"); anchor.href = url; anchor.download = `sami-notes-data-${new Date().toISOString().slice(0, 10)}.json`; anchor.click(); setTimeout(() => URL.revokeObjectURL(url), 1000);
+    setNotice("Note data downloaded. Attached files stay in private storage.");
   }
 
   async function importBackup(event: React.ChangeEvent<HTMLInputElement>) {
@@ -194,7 +231,7 @@ export default function Workspace({ displayName }: { displayName: string }) {
     return <div className="notes-grid">{notesToShow.map(note => {
       const course = data.courses.find(x => x.id === note.courseId);
       const trimester = data.trimesters.find(x => x.id === course?.trimesterId);
-      return <button className="note-card" key={note.id} onClick={() => openEdit("note", note)}><span className="note-card-top"><span className="note-icon"><FileText size={18}/></span><span className={`visibility-badge ${note.published ? "published" : "hidden"}`}>{note.published ? <><Eye size={13}/> Published</> : <><EyeOff size={13}/> Hidden</>}</span></span><strong>{note.title}</strong><span className="note-excerpt">{note.content || "A new note, ready for your thoughts."}</span><span className="note-tags">{note.tags.split(",").map(t => t.trim()).filter(Boolean).slice(0, 2).map(tag => <i key={tag}>{tag}</i>)}</span><span className="note-card-bottom"><span>{course?.code || course?.title || "Course"}{trimester ? ` · ${trimester.title}` : ""}</span><span>{new Date(note.updatedAt).toLocaleDateString(undefined, { month: "short", day: "numeric" })}</span></span></button>;
+      return <button className="note-card" key={note.id} onClick={() => openEdit("note", note)}><span className="note-card-top"><span className="note-icon"><FileText size={18}/></span><span className={`visibility-badge ${note.published ? "published" : "hidden"}`}>{note.published ? <><Eye size={13}/> Published</> : <><EyeOff size={13}/> Hidden</>}</span></span><strong>{note.title}</strong><span className="note-excerpt">{note.content || (note.attachments.length ? `${note.attachments.length} attached ${note.attachments.length === 1 ? "file" : "files"}` : "A new note, ready for your thoughts.")}</span>{note.attachments.length > 0 && <span className="note-attachment-count"><Paperclip size={12}/>{note.attachments.length} {note.attachments.length === 1 ? "file" : "files"}</span>}<span className="note-tags">{note.tags.split(",").map(t => t.trim()).filter(Boolean).slice(0, 2).map(tag => <i key={tag}>{tag}</i>)}</span><span className="note-card-bottom"><span>{course?.code || course?.title || "Course"}{trimester ? ` · ${trimester.title}` : ""}</span><span>{new Date(note.updatedAt).toLocaleDateString(undefined, { month: "short", day: "numeric" })}</span></span></button>;
     })}</div>;
   }
 
@@ -205,7 +242,7 @@ export default function Workspace({ displayName }: { displayName: string }) {
       <div className="sidebar-group-heading"><span>TRIMESTERS</span><button className="icon-button tiny" onClick={() => openNew("trimester")} aria-label="Add trimester"><Plus size={17}/></button></div>
       {data.trimesters.map(trimester => <div className="sidebar-trimester" key={trimester.id}><button className={`sidebar-link ${view === `trim:${trimester.id}` ? "active" : ""}`} onClick={() => navigate(`trim:${trimester.id}`)}><Layers3 size={17}/><span className="truncate">{trimester.title}</span><ChevronDown size={14}/></button>{data.courses.filter(c => c.trimesterId === trimester.id).map(course => <button key={course.id} className={`sidebar-course ${view === `course:${course.id}` ? "active" : ""}`} onClick={() => navigate(`course:${course.id}`)}><span className={`course-dot ${course.color}`}/><span className="truncate">{course.title}</span></button>)}</div>)}
       {!data.trimesters.length && !loading && <p className="sidebar-hint">Your trimesters will appear here.</p>}
-      </div><div className="sidebar-bottom"><button className="sidebar-link" onClick={exportBackup}><Download size={18}/> Export backup</button><button className="sidebar-link" onClick={() => document.getElementById("backup-file")?.click()}><Upload size={18}/> Import backup</button><input id="backup-file" className="file-input-hidden" type="file" accept="application/json,.json" onChange={importBackup}/><button className="sidebar-link" onClick={() => void logout()}><LogOut size={18}/> Sign out</button><div className="account-card"><span className="avatar">{displayName.charAt(0).toUpperCase()}</span><span><strong>{displayName}</strong><small>Private owner space</small></span></div></div>
+      </div><div className="sidebar-bottom"><button className="sidebar-link" onClick={exportBackup}><Download size={18}/> Export note data</button><button className="sidebar-link" onClick={() => document.getElementById("backup-file")?.click()}><Upload size={18}/> Import backup</button><input id="backup-file" className="file-input-hidden" type="file" accept="application/json,.json" onChange={importBackup}/><button className="sidebar-link" onClick={() => void logout()}><LogOut size={18}/> Sign out</button><div className="account-card"><span className="avatar">{displayName.charAt(0).toUpperCase()}</span><span><strong>{displayName}</strong><small>Private owner space</small></span></div></div>
     </aside>
     {sidebarOpen && <button className="sidebar-scrim" onClick={() => setSidebarOpen(false)} aria-label="Close menu"/>}
     <div className="workspace-main"><header className="workspace-header"><button className="icon-button mobile-menu" onClick={() => setSidebarOpen(true)} aria-label="Open menu"><Menu size={21}/></button><div className="header-search"><Search size={18}/><input aria-label="Search notes" placeholder="Search notes, courses, ideas..." value={query} onChange={event => { setQuery(event.target.value); setView(event.target.value ? "search" : "home"); }}/></div><div className="header-actions"><Link href="/notes" className="header-public-link"><Eye size={17}/> Public view</Link><button className="header-export" onClick={exportBackup} title="Download backup"><Download size={18}/></button><button className="button-primary compact" onClick={() => data.courses.length ? openNew("note", currentCourse?.id || data.courses[0].id) : data.trimesters.length ? openNew("course", currentTrimester?.id || data.trimesters[0].id) : openNew("trimester")}><Plus size={18}/> <span>{data.courses.length ? "New note" : data.trimesters.length ? "Add course" : "Add trimester"}</span></button></div></header>
@@ -221,12 +258,19 @@ export default function Workspace({ displayName }: { displayName: string }) {
       </main>
     </div>
 
-    {form && <div className="modal-backdrop" onMouseDown={event => { if (event.target === event.currentTarget && !saving) setForm(null); }}><div className={`editor-modal ${form.kind === "note" ? "note-editor" : ""}`} role="dialog" aria-modal="true" aria-labelledby="modal-title"><form onSubmit={saveForm}><div className="modal-header"><div><span className="eyebrow plain">{form.id ? "EDIT YOUR" : "CREATE A NEW"} {form.kind.toUpperCase()}</span><h2 id="modal-title">{form.id ? `Edit ${form.kind}` : form.kind === "trimester" ? "New trimester" : form.kind === "course" ? "New course" : "New note"}</h2></div><button type="button" className="icon-button" onClick={() => setForm(null)} aria-label="Close"><X size={20}/></button></div>{formError && <div className="modal-error" role="alert">{formError}</div>}<div className="modal-body">
+    {form && <div className="modal-backdrop" onMouseDown={event => { if (event.target === event.currentTarget && !saving) setForm(null); }}><div className={`editor-modal ${form.kind === "note" ? "note-editor" : ""}`} role="dialog" aria-modal="true" aria-labelledby="modal-title"><form onSubmit={saveForm}><div className="modal-header"><div><span className="eyebrow plain">{form.id ? "EDIT YOUR" : "CREATE A NEW"} {form.kind.toUpperCase()}</span><h2 id="modal-title">{form.id ? `Edit ${form.kind}` : form.kind === "trimester" ? "New trimester" : form.kind === "course" ? "New course" : "New note"}</h2></div><button type="button" className="icon-button" disabled={saving} onClick={() => setForm(null)} aria-label="Close"><X size={20}/></button></div>{formError && <div className="modal-error" role="alert">{formError}</div>}<div className="modal-body">
       <label className="field"><span>{form.kind === "note" ? "Note title" : form.kind === "course" ? "Course name" : "Trimester name"} <b>*</b></span><input autoFocus required maxLength={form.kind === "note" ? 150 : 100} value={form.title} onChange={event => patchForm("title", event.target.value)} placeholder={form.kind === "trimester" ? "e.g. First trimester" : form.kind === "course" ? "e.g. Introduction to Programming" : "Give this note a clear title"}/></label>
       {form.kind === "trimester" && <label className="field"><span>Description <small>optional</small></span><textarea rows={3} maxLength={300} value={form.description} onChange={event => patchForm("description", event.target.value)} placeholder="What will you focus on this trimester?"/></label>}
       {form.kind === "course" && <><label className="field"><span>Trimester <b>*</b></span><select required disabled={!!form.id} value={form.trimesterId} onChange={event => patchForm("trimesterId", event.target.value)}><option value="">Choose a trimester</option>{data.trimesters.map(t => <option key={t.id} value={t.id}>{t.title}</option>)}</select></label><label className="field"><span>Course code <small>optional</small></span><input maxLength={30} value={form.code} onChange={event => patchForm("code", event.target.value)} placeholder="e.g. CSE 101"/></label><div className="field"><span>Choose a color</span><div className="color-options">{COLORS.map(color => <button type="button" key={color} onClick={() => patchForm("color", color)} className={`color-option ${color} ${form.color === color ? "selected" : ""}`} aria-label={`${color} color`}>{form.color === color && <Check size={17}/>}</button>)}</div></div></>}
-      {form.kind === "note" && <><label className="field"><span>Course <b>*</b></span><select required value={form.courseId} onChange={event => patchForm("courseId", event.target.value)}><option value="">Choose a course</option>{data.trimesters.map(t => <optgroup key={t.id} label={t.title}>{data.courses.filter(c => c.trimesterId === t.id).map(c => <option key={c.id} value={c.id}>{c.title}</option>)}</optgroup>)}</select></label><label className="field"><span>Your note</span><textarea className="note-textarea" rows={12} maxLength={100000} value={form.content} onChange={event => patchForm("content", event.target.value)} placeholder="Start writing your thoughts, summaries, formulas, or reminders..."/></label><div className="field-row"><label className="field"><span>Tags <small>separate with commas</small></span><input maxLength={300} value={form.tags} onChange={event => patchForm("tags", event.target.value)} placeholder="exam, chapter 1"/></label><label className="field"><span>Related link <small>optional</small></span><input type="url" value={form.sourceUrl} onChange={event => patchForm("sourceUrl", event.target.value)} placeholder="https://..."/></label></div><label className="pin-toggle"><input type="checkbox" checked={form.pinned} onChange={event => patchForm("pinned", event.target.checked)}/><Pin size={17}/> Pin this note for quick access</label><label className="publish-toggle"><input type="checkbox" checked={form.published} onChange={event => patchForm("published", event.target.checked)}/><span><strong>{form.published ? "Published for viewers" : "Hidden from viewers"}</strong><small>{form.published ? "Anyone visiting the public notes page can read this note." : "Only you can see this note in your workspace."}</small></span>{form.published ? <Eye size={20}/> : <EyeOff size={20}/>}</label></>}
-    </div><div className="modal-footer">{form.id && <button type="button" className="danger-button" onClick={() => { const item = form.kind === "trimester" ? data.trimesters.find(x => x.id === form.id) : form.kind === "course" ? data.courses.find(x => x.id === form.id) : data.notes.find(x => x.id === form.id); if (item) void remove(form.kind, item); }}><Trash2 size={16}/> Delete</button>}<button type="button" className="soft-button" onClick={() => setForm(null)}>Cancel</button><button className="button-primary compact" disabled={saving} type="submit">{saving ? "Saving..." : form.id ? "Save changes" : `Create ${form.kind}`} <ArrowRight size={16}/></button></div></form></div></div>}
+      {form.kind === "note" && <>
+        <label className="field"><span>Course <b>*</b></span><select required value={form.courseId} onChange={event => patchForm("courseId", event.target.value)}><option value="">Choose a course</option>{data.trimesters.map(t => <optgroup key={t.id} label={t.title}>{data.courses.filter(c => c.trimesterId === t.id).map(c => <option key={c.id} value={c.id}>{c.title}</option>)}</optgroup>)}</select></label>
+        <div className="field attachment-field"><span>Attachments <small>PDF or other files, up to 50 MB each</small></span><input id="note-files" className="file-input-hidden" type="file" multiple onChange={selectFiles}/><button type="button" className="attachment-picker" onClick={() => document.getElementById("note-files")?.click()}><Paperclip size={20}/><span><strong>Choose files to upload</strong><small>Attach PDFs, images, slides, documents, or other files</small></span><Plus size={18}/></button>{(form.attachments.length > 0 || pendingFiles.length > 0) && <div className="attachment-list">{form.attachments.map(file => <div className="attachment-row" key={file.id}><FileText size={18}/><a href={form.id ? `/api/attachments/${form.id}/${file.id}` : "#"} target="_blank" rel="noopener noreferrer">{file.name}<small>{fileSize(file.size)} - Saved</small></a><button type="button" className="icon-button" aria-label={`Remove ${file.name}`} onClick={() => patchForm("attachments", form.attachments.filter(item => item.id !== file.id))}><X size={16}/></button></div>)}{pendingFiles.map((file, index) => <div className="attachment-row pending" key={`${file.name}-${index}`}><Paperclip size={18}/><span>{file.name}<small>{fileSize(file.size)} - Ready to upload</small></span><button type="button" className="icon-button" aria-label={`Remove ${file.name}`} onClick={() => setPendingFiles(current => current.filter((_, i) => i !== index))}><X size={16}/></button></div>)}</div>}{uploadStatus && <p className="upload-status" role="status">{uploadStatus}</p>}</div>
+        <label className="field"><span>Your note <small>optional when adding files</small></span><textarea className="note-textarea" rows={12} maxLength={100000} value={form.content} onChange={event => patchForm("content", event.target.value)} placeholder="Start writing your thoughts, summaries, formulas, or reminders..."/></label>
+        <div className="field-row"><label className="field"><span>Tags <small>separate with commas</small></span><input maxLength={300} value={form.tags} onChange={event => patchForm("tags", event.target.value)} placeholder="exam, chapter 1"/></label><label className="field"><span>Related link <small>optional</small></span><input type="url" value={form.sourceUrl} onChange={event => patchForm("sourceUrl", event.target.value)} placeholder="https://..."/></label></div>
+        <label className="pin-toggle"><input type="checkbox" checked={form.pinned} onChange={event => patchForm("pinned", event.target.checked)}/><Pin size={17}/> Pin this note for quick access</label>
+        <label className="publish-toggle"><input type="checkbox" checked={form.published} onChange={event => patchForm("published", event.target.checked)}/><span><strong>{form.published ? "Published for viewers" : "Hidden from viewers"}</strong><small>{form.published ? "Anyone visiting the public notes page can read this note and its files." : "Only you can see this note and its files in your workspace."}</small></span>{form.published ? <Eye size={20}/> : <EyeOff size={20}/>}</label>
+      </>}
+    </div><div className="modal-footer">{form.id && <button type="button" className="danger-button" onClick={() => { const item = form.kind === "trimester" ? data.trimesters.find(x => x.id === form.id) : form.kind === "course" ? data.courses.find(x => x.id === form.id) : data.notes.find(x => x.id === form.id); if (item) void remove(form.kind, item); }}><Trash2 size={16}/> Delete</button>}<button type="button" className="soft-button" disabled={saving} onClick={() => setForm(null)}>Cancel</button><button className="button-primary compact" disabled={saving} type="submit">{saving ? "Saving..." : form.id ? "Save changes" : `Create ${form.kind}`} <ArrowRight size={16}/></button></div></form></div></div>}
   </div>;
 }
 

@@ -1,9 +1,12 @@
 export type Trimester = { id: string; title: string; description: string; createdAt: number };
 export type Course = { id: string; trimesterId: string; title: string; code: string; color: string; createdAt: number };
-export type Note = { id: string; courseId: string; title: string; content: string; tags: string; sourceUrl: string; pinned: boolean; published: boolean; createdAt: number; updatedAt: number };
+export type Attachment = { id: string; pathname: string; name: string; size: number; contentType: string; createdAt: number };
+export type Note = { id: string; courseId: string; title: string; content: string; tags: string; sourceUrl: string; pinned: boolean; published: boolean; attachments: Attachment[]; createdAt: number; updatedAt: number };
 export type NotesData = { trimesters: Trimester[]; courses: Course[]; notes: Note[] };
 
 export const EMPTY_DATA: NotesData = { trimesters: [], courses: [], notes: [] };
+export const MAX_ATTACHMENT_SIZE = 50_000_000;
+export const ATTACHMENT_PATH = /^note-files\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 function object(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Invalid notes data.");
@@ -41,9 +44,23 @@ export function parseNotesData(value: unknown): NotesData {
     const sourceUrl = string(row.sourceUrl, 2048);
     if (sourceUrl && !/^https?:\/\//i.test(sourceUrl)) throw new Error("Invalid note link.");
     if (typeof row.pinned !== "boolean" || typeof row.published !== "boolean") throw new Error("Invalid notes data.");
-    return { id: string(row.id, 100, true), courseId: string(row.courseId, 100, true), title: string(row.title, 150, true), content: string(row.content, 100000), tags: string(row.tags, 300), sourceUrl, pinned: row.pinned, published: row.published, createdAt: date(row.createdAt), updatedAt: date(row.updatedAt) };
+    const attachments = row.attachments === undefined ? [] : row.attachments;
+    if (!Array.isArray(attachments) || attachments.length > 20) throw new Error("Invalid note attachments.");
+    const parsedAttachments = attachments.map(value => {
+      const file = object(value);
+      const pathname = string(file.pathname, 100, true);
+      if (!ATTACHMENT_PATH.test(pathname)) throw new Error("Invalid attachment path.");
+      const size = date(file.size);
+      if (size > MAX_ATTACHMENT_SIZE) throw new Error("Attachment is too large.");
+      const contentType = string(file.contentType, 120, true);
+      if (!/^[\w.+-]+\/[\w.+-]+$/.test(contentType)) throw new Error("Invalid attachment type.");
+      return { id: string(file.id, 100, true), pathname, name: string(file.name, 255, true), size, contentType, createdAt: date(file.createdAt) };
+    });
+    unique(parsedAttachments.map(file => file.id));
+    return { id: string(row.id, 100, true), courseId: string(row.courseId, 100, true), title: string(row.title, 150, true), content: string(row.content, 100000), tags: string(row.tags, 300), sourceUrl, pinned: row.pinned, published: row.published, attachments: parsedAttachments, createdAt: date(row.createdAt), updatedAt: date(row.updatedAt) };
   });
   unique(trimesters.map(row => row.id)); unique(courses.map(row => row.id)); unique(notes.map(row => row.id));
+  unique(notes.flatMap(row => row.attachments.map(file => file.pathname)));
   const trimesterIds = new Set(trimesters.map(row => row.id));
   const courseIds = new Set(courses.map(row => row.id));
   if (courses.some(row => !trimesterIds.has(row.trimesterId)) || notes.some(row => !courseIds.has(row.courseId))) throw new Error("Notes or courses are missing a parent.");
