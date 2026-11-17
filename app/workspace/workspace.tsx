@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { upload } from "@vercel/blob/client";
-import { ArrowRight, BookOpen, Bookmark, Check, ChevronDown, ChevronRight, Download, Eye, EyeOff, FileText, FolderOpen, Home, Layers3, LogOut, Menu, Paperclip, Pencil, Pin, Plus, Search, Trash2, Upload, X } from "lucide-react";
+import { ArrowRight, BookOpen, Bookmark, Check, ChevronDown, ChevronRight, Download, Eye, EyeOff, FileText, FolderOpen, Home, Layers3, LockKeyhole, LogOut, Menu, Paperclip, Pencil, Pin, Plus, Search, Trash2, Upload, X } from "lucide-react";
 import type { Attachment, Course, Note, NotesData, Trimester } from "@/lib/notes";
 import { rebaseCreated, type CreatedItem } from "@/lib/rebase-created";
 
@@ -68,6 +68,12 @@ export default function Workspace({ displayName }: { displayName: string }) {
   const [pendingFiles, setPendingFiles] = useState<File[]>([]);
   const [uploadStatus, setUploadStatus] = useState("");
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [passwordOpen, setPasswordOpen] = useState(false);
+  const [currentPassword, setCurrentPassword] = useState("");
+  const [newPassword, setNewPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
+  const [passwordError, setPasswordError] = useState("");
+  const [passwordBusy, setPasswordBusy] = useState(false);
 
   const reload = useCallback(async () => {
     try {
@@ -143,6 +149,32 @@ export default function Workspace({ displayName }: { displayName: string }) {
   }
 
   async function logout() { await fetch("/api/auth/logout", { method: "POST" }); window.location.assign("/"); }
+
+  function closePassword() {
+    setPasswordOpen(false);
+    setCurrentPassword("");
+    setNewPassword("");
+    setConfirmPassword("");
+    setPasswordError("");
+  }
+
+  async function savePassword(event: React.FormEvent) {
+    event.preventDefault();
+    if (newPassword !== confirmPassword) { setPasswordError("New passwords do not match."); return; }
+    setPasswordBusy(true);
+    setPasswordError("");
+    try {
+      const response = await fetch("/api/auth/password", {
+        method: "POST", headers: { "Content-Type": "application/json" }, cache: "no-store",
+        body: JSON.stringify({ currentPassword, newPassword }),
+      });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error || "Could not change password.");
+      closePassword();
+      setNotice("Password changed. Other owner sessions have been signed out.");
+    } catch (caught) { setPasswordError(caught instanceof Error ? caught.message : "Could not change password."); }
+    finally { setPasswordBusy(false); }
+  }
 
   async function saveForm(event: React.FormEvent) {
     event.preventDefault();
@@ -254,7 +286,7 @@ export default function Workspace({ displayName }: { displayName: string }) {
       <div className="sidebar-group-heading"><span>TRIMESTERS</span><button className="icon-button tiny" onClick={() => openNew("trimester")} aria-label="Add trimester"><Plus size={17}/></button></div>
       {data.trimesters.map(trimester => <div className="sidebar-trimester" key={trimester.id}><button className={`sidebar-link ${view === `trim:${trimester.id}` ? "active" : ""}`} onClick={() => navigate(`trim:${trimester.id}`)}><Layers3 size={17}/><span className="truncate">{trimester.title}</span><ChevronDown size={14}/></button>{data.courses.filter(c => c.trimesterId === trimester.id).map(course => <button key={course.id} className={`sidebar-course ${view === `course:${course.id}` ? "active" : ""}`} onClick={() => navigate(`course:${course.id}`)}><span className={`course-dot ${course.color}`}/><span className="truncate">{course.title}</span></button>)}</div>)}
       {!data.trimesters.length && !loading && <p className="sidebar-hint">Your trimesters will appear here.</p>}
-      </div><div className="sidebar-bottom"><button className="sidebar-link" onClick={exportBackup}><Download size={18}/> Export note data</button><button className="sidebar-link" onClick={() => document.getElementById("backup-file")?.click()}><Upload size={18}/> Import backup</button><input id="backup-file" className="file-input-hidden" type="file" accept="application/json,.json" onChange={importBackup}/><button className="sidebar-link" onClick={() => void logout()}><LogOut size={18}/> Sign out</button><div className="account-card"><span className="avatar">{displayName.charAt(0).toUpperCase()}</span><span><strong>{displayName}</strong><small>Private owner space</small></span></div></div>
+      </div><div className="sidebar-bottom"><button className="sidebar-link" onClick={exportBackup}><Download size={18}/> Export note data</button><button className="sidebar-link" onClick={() => document.getElementById("backup-file")?.click()}><Upload size={18}/> Import backup</button><input id="backup-file" className="file-input-hidden" type="file" accept="application/json,.json" onChange={importBackup}/><button className="sidebar-link" onClick={() => { setSidebarOpen(false); setPasswordOpen(true); }}><LockKeyhole size={18}/> Change password</button><button className="sidebar-link" onClick={() => void logout()}><LogOut size={18}/> Sign out</button><div className="account-card"><span className="avatar">{displayName.charAt(0).toUpperCase()}</span><span><strong>{displayName}</strong><small>Private owner space</small></span></div></div>
     </aside>
     {sidebarOpen && <button className="sidebar-scrim" onClick={() => setSidebarOpen(false)} aria-label="Close menu"/>}
     <div className="workspace-main"><header className="workspace-header"><button className="icon-button mobile-menu" onClick={() => setSidebarOpen(true)} aria-label="Open menu"><Menu size={21}/></button><div className="header-search"><Search size={18}/><input aria-label="Search notes" placeholder="Search notes, courses, ideas..." value={query} onChange={event => { setQuery(event.target.value); setView(event.target.value ? "search" : "home"); }}/></div><div className="header-actions"><Link href="/notes" className="header-public-link"><Eye size={17}/> Public view</Link><button className="header-export" onClick={exportBackup} title="Download backup"><Download size={18}/></button><button className="button-primary compact" onClick={() => data.courses.length ? openNew("note", currentCourse?.id || data.courses[0].id) : data.trimesters.length ? openNew("course", currentTrimester?.id || data.trimesters[0].id) : openNew("trimester")}><Plus size={18}/> <span>{data.courses.length ? "New note" : data.trimesters.length ? "Add course" : "Add trimester"}</span></button></div></header>
@@ -270,6 +302,7 @@ export default function Workspace({ displayName }: { displayName: string }) {
       </main>
     </div>
 
+    {passwordOpen && <div className="modal-backdrop" onMouseDown={event => { if (event.target === event.currentTarget && !passwordBusy) closePassword(); }}><div className="editor-modal" role="dialog" aria-modal="true" aria-labelledby="password-title"><form onSubmit={savePassword}><div className="modal-header"><div><span className="eyebrow plain">OWNER ACCESS</span><h2 id="password-title">Set your password</h2></div><button type="button" className="icon-button" disabled={passwordBusy} onClick={closePassword} aria-label="Close"><X size={20}/></button></div><div className="modal-body"><p className="password-hint">Choose your own password. If this is your first custom password, you can leave the current password blank while signed in. Later changes require it.</p><label className="field"><span>Current password <small>optional for first setup</small></span><input type="password" autoComplete="current-password" maxLength={100} value={currentPassword} onChange={event => setCurrentPassword(event.target.value)}/></label><label className="field"><span>New password</span><input type="password" autoComplete="new-password" required minLength={8} maxLength={100} value={newPassword} onChange={event => setNewPassword(event.target.value)} placeholder="At least 8 characters"/></label><label className="field"><span>Confirm new password</span><input type="password" autoComplete="new-password" required minLength={8} maxLength={100} value={confirmPassword} onChange={event => setConfirmPassword(event.target.value)}/></label>{passwordError && <div className="modal-error" role="alert">{passwordError}</div>}</div><div className="modal-footer"><button type="button" className="soft-button" disabled={passwordBusy} onClick={closePassword}>Cancel</button><button className="button-primary compact" disabled={passwordBusy} type="submit">{passwordBusy ? "Saving..." : "Save password"}<ArrowRight size={16}/></button></div></form></div></div>}
     {form && <div className="modal-backdrop" onMouseDown={event => { if (event.target === event.currentTarget && !saving) setForm(null); }}><div className={`editor-modal ${form.kind === "note" ? "note-editor" : ""}`} role="dialog" aria-modal="true" aria-labelledby="modal-title"><form onSubmit={saveForm}><div className="modal-header"><div><span className="eyebrow plain">{form.id ? "EDIT YOUR" : "CREATE A NEW"} {form.kind.toUpperCase()}</span><h2 id="modal-title">{form.id ? `Edit ${form.kind}` : form.kind === "trimester" ? "New trimester" : form.kind === "course" ? "New course" : "New note"}</h2></div><button type="button" className="icon-button" disabled={saving} onClick={() => setForm(null)} aria-label="Close"><X size={20}/></button></div>{formError && <div className="modal-error" role="alert">{formError}</div>}<div className="modal-body">
       <label className="field"><span>{form.kind === "note" ? "Note title" : form.kind === "course" ? "Course name" : "Trimester name"} <b>*</b></span><input autoFocus required maxLength={form.kind === "note" ? 150 : 100} value={form.title} onChange={event => patchForm("title", event.target.value)} placeholder={form.kind === "trimester" ? "e.g. First trimester" : form.kind === "course" ? "e.g. Introduction to Programming" : "Give this note a clear title"}/></label>
       {form.kind === "trimester" && <label className="field"><span>Description <small>optional</small></span><textarea rows={3} maxLength={300} value={form.description} onChange={event => patchForm("description", event.target.value)} placeholder="What will you focus on this trimester?"/></label>}
